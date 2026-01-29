@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Routing Experiment: Centralized vs Distributed
+Routing Experiment: Centralized vs Distributed vs Direct
 
-Compares two routing approaches:
-- Idea 1: Centralized routing (one root, 40 direct sub-agents)
-- Idea 2: Distributed routing (root -> categories -> domains -> sub-agents)
+Compares three routing approaches:
+- Idea 1: Centralized routing (Root → 40 Domain Agents)
+- Idea 2: Distributed routing (Root → 40 Domains → Sub-Agents)
+- Idea 3: Direct routing (Root → 148 Sub-Agents, no domain layer)
 """
 
 import argparse
@@ -265,6 +266,94 @@ Be decisive - pick ONE domain and delegate immediately."""
     return root_coordinator, {'domain_agents': domain_agent_map}
 
 
+def create_direct_system():
+    """Create direct routing (Idea 3): Root -> All 148 sub-agents directly (no domain agents)."""
+    # Create all sub-agents directly under root
+    sub_agents_list = []
+    sub_agent_descriptions = []
+
+    for domain in DOMAINS:
+        domain_name = domain['name']
+
+        # For domains without sub-agents, create a domain agent as a "sub-agent"
+        sub_names = domain.get("sub_agents", [])
+
+        if not sub_names:
+            # Domain without sub-agents - create domain-level agent
+            full_description = f"""{domain['description']}
+
+Keywords: {', '.join(domain['keywords'])}"""
+
+            agent = LlmAgent(
+                name=f"{domain_name}",
+                model=MODEL,
+                instruction=f"""You are the {domain_name.title()} agent.
+
+{full_description}
+
+Acknowledge you are handling this request as the {domain_name} agent.
+Start your response with: [ROUTED_TO: {domain_name}]""",
+                description=full_description,
+            )
+            sub_agents_list.append(agent)
+            sub_agent_descriptions.append(f"- **{domain_name}**: {domain['description']}")
+
+        else:
+            # Create individual sub-agents
+            for sub_name in sub_names:
+                sub_desc = SUB_AGENTS.get(sub_name, f"Handles {sub_name}")
+
+                # Include domain context in sub-agent description
+                full_description = f"""{sub_desc}
+
+Parent domain: {domain_name}
+Domain keywords: {', '.join(domain['keywords'])}"""
+
+                agent = LlmAgent(
+                    name=f"{domain_name}_{sub_name}",
+                    model=MODEL,
+                    instruction=f"""You are the {sub_name} agent.
+
+{full_description}
+
+Acknowledge you are handling this request.
+Start your response with: [ROUTED_TO: {domain_name}_{sub_name}]""",
+                    description=full_description,
+                )
+                sub_agents_list.append(agent)
+                sub_agent_descriptions.append(f"- **{domain_name}_{sub_name}**: {sub_desc}")
+
+    # Root coordinator routes directly to all sub-agents
+    total_agents = len(sub_agents_list)
+    routing_instruction = f"""You are the direct routing coordinator. Your ONLY job is to route queries to specialized agents.
+
+**CRITICAL RULES:**
+1. You MUST ALWAYS delegate to a specialized agent - never answer queries yourself
+2. Read ALL available agents before deciding
+3. When in doubt, choose the closest match
+
+**Available Specialized Agents ({total_agents} total):**
+{chr(10).join(sub_agent_descriptions)}
+
+**ROUTING HINTS FOR AMBIGUOUS CASES:**
+- "expense", "payment", "spending", "report cost" → finance_expenses
+- "when do I get paid", "paycheck", "salary inquiry" → hr_payroll
+- "training", "enroll in course", "enroll in program" → hr (learning_development also acceptable)
+- "travel", "flight", "hotel", "vacation", "trip" → travel_* (specific sub-agent)
+- "order", "return", "refund", "delivery" → customer_service_* (specific sub-agent)
+
+Now route the query and DELEGATE immediately."""
+
+    root_coordinator = LlmAgent(
+        name="direct_coordinator",
+        model=MODEL,
+        instruction=routing_instruction,
+        sub_agents=sub_agents_list,
+    )
+
+    return root_coordinator, {'sub_agents': sub_agents_list}
+
+
 async def run_query_async(agent, query: str, mode: str, run_num: int = 1) -> Dict:
     """Run a query and return metrics using ADK's InMemoryRunner."""
     logging.info(f"Run {run_num} - {mode}: Executing query: '{query[:50]}...'")
@@ -397,31 +486,53 @@ def calculate_run_metrics(results: List[Dict], mode: str = "", run_num: int = 1)
     }
 
 
-def print_multi_run_table(centralized_runs: List[Dict], distributed_runs: List[Dict]):
+def print_multi_run_table(centralized_runs: List[Dict], distributed_runs: List[Dict], direct_runs: List[Dict] = None):
     """Print a table comparing all runs with statistics."""
-    print("\n" + "=" * 100)
+    print("\n" + "=" * 130)
     print("  MULTI-RUN COMPARISON TABLE")
-    print("=" * 100)
+    print("=" * 130)
 
     # Header
-    header = f"{'Run':<6} {'Cent Accuracy':<15} {'Cent Latency':<15} {'Cent Hops':<12} {'Dist Accuracy':<15} {'Dist Latency':<15} {'Dist Hops':<12}"
-    print(header)
-    print("-" * 100)
+    if direct_runs:
+        header = f"{'Run':<6} {'Cent Acc':<12} {'Cent Lat':<10} {'Cent Hop':<10} {'Dist Acc':<12} {'Dist Lat':<10} {'Dist Hop':<10} {'Direct Acc':<12} {'Direct Lat':<10} {'Direct Hop':<10}"
+        print(header)
+        print("-" * 130)
+    else:
+        header = f"{'Run':<6} {'Cent Accuracy':<15} {'Cent Latency':<15} {'Cent Hops':<12} {'Dist Accuracy':<15} {'Dist Latency':<15} {'Dist Hops':<12}"
+        print(header)
+        print("-" * 100)
 
     # Data rows
     for i in range(len(centralized_runs)):
         c = centralized_runs[i]
         d = distributed_runs[i]
-        row = (f"{i+1:<6} "
-               f"{c['accuracy']:.1f}% ({c['correct']}/{c['total']}){' ':<4} "
-               f"{c['avg_latency']:.2f}s{' ':<8} "
-               f"{c['avg_hops']:.1f}{' ':<7} "
-               f"{d['accuracy']:.1f}% ({d['correct']}/{d['total']}){' ':<4} "
-               f"{d['avg_latency']:.2f}s{' ':<8} "
-               f"{d['avg_hops']:.1f}")
-        print(row)
+        if direct_runs and i < len(direct_runs):
+            dr = direct_runs[i]
+            row = (f"{i+1:<6} "
+                   f"{c['accuracy']:.0f}%{' ':<6} "
+                   f"{c['avg_latency']:.2f}s{' ':<4} "
+                   f"{c['avg_hops']:.1f}{' ':<6} "
+                   f"{d['accuracy']:.0f}%{' ':<6} "
+                   f"{d['avg_latency']:.2f}s{' ':<4} "
+                   f"{d['avg_hops']:.1f}{' ':<6} "
+                   f"{dr['accuracy']:.0f}%{' ':<6} "
+                   f"{dr['avg_latency']:.2f}s{' ':<4} "
+                   f"{dr['avg_hops']:.1f}")
+            print(row)
+        else:
+            row = (f"{i+1:<6} "
+                   f"{c['accuracy']:.1f}% ({c['correct']}/{c['total']}){' ':<4} "
+                   f"{c['avg_latency']:.2f}s{' ':<8} "
+                   f"{c['avg_hops']:.1f}{' ':<7} "
+                   f"{d['accuracy']:.1f}% ({d['correct']}/{d['total']}){' ':<4} "
+                   f"{d['avg_latency']:.2f}s{' ':<8} "
+                   f"{d['avg_hops']:.1f}")
+            print(row)
 
-    print("-" * 100)
+    if direct_runs:
+        print("-" * 130)
+    else:
+        print("-" * 100)
 
     # Statistics rows
     cen_accs = [r['accuracy'] for r in centralized_runs]
@@ -442,33 +553,66 @@ def print_multi_run_table(centralized_runs: List[Dict], distributed_runs: List[D
             return "N/A"
         return f"avg:{statistics.mean(values):.2f} min:{min(values):.2f} max:{max(values):.2f}"
 
-    print(f"\n{'STATISTICS':<6} {'Centralized':<42} {'Distributed':<42}")
-    print("-" * 100)
+    if direct_runs:
+        dir_accs = [r['accuracy'] for r in direct_runs]
+        dir_lats = [r['avg_latency'] for r in direct_runs]
+        dir_hops = [r['avg_hops'] for r in direct_runs]
 
-    print(f"{'Accuracy':<6} {format_stats(cen_accs):<42} {format_stats(dist_accs):<42}")
-    print(f"{'Latency':<6} {format_lat_stats(cen_lats):<42} {format_lat_stats(dist_lats):<42}")
-    print(f"{'Hops':<6} {format_stats(cen_hops):<42} {format_stats(dist_hops):<42}")
+        print(f"\n{'STATISTICS':<8} {'Centralized':<30} {'Distributed':<30} {'Direct':<30}")
+        print("-" * 130)
 
-    # Overall winner
-    print("-" * 100)
-    avg_cen_acc = statistics.mean(cen_accs)
-    avg_dist_acc = statistics.mean(dist_accs)
-    avg_cen_lat = statistics.mean(cen_lats)
-    avg_dist_lat = statistics.mean(dist_lats)
+        print(f"{'Accuracy':<8} {format_stats(cen_accs):<30} {format_stats(dist_accs):<30} {format_stats(dir_accs):<30}")
+        print(f"{'Latency':<8} {format_lat_stats(cen_lats):<30} {format_lat_stats(dist_lats):<30} {format_lat_stats(dir_lats):<30}")
+        print(f"{'Hops':<8} {format_stats(cen_hops):<30} {format_stats(dist_hops):<30} {format_stats(dir_hops):<30}")
 
-    acc_winner = "Centralized" if avg_cen_acc > avg_dist_acc else ("Distributed" if avg_dist_acc > avg_cen_acc else "Tie")
-    lat_winner = "Centralized" if avg_cen_lat < avg_dist_lat else "Distributed"
+        # Overall winner
+        print("-" * 130)
+        avg_cen_acc = statistics.mean(cen_accs)
+        avg_dist_acc = statistics.mean(dist_accs)
+        avg_dir_acc = statistics.mean(dir_accs)
+        avg_cen_lat = statistics.mean(cen_lats)
+        avg_dist_lat = statistics.mean(dist_lats)
+        avg_dir_lat = statistics.mean(dir_lats)
 
-    print(f"\nOVERALL WINNER (averaged over {len(centralized_runs)} runs):")
-    print(f"  Accuracy: {acc_winner} ({avg_cen_acc:.1f}% vs {avg_dist_acc:.1f}%)")
-    print(f"  Latency: {lat_winner} ({avg_cen_lat:.2f}s vs {avg_dist_lat:.2f}s)")
-    print("=" * 100 + "\n")
+        best_acc = max(avg_cen_acc, avg_dist_acc, avg_dir_acc)
+        acc_winner = "Centralized" if best_acc == avg_cen_acc else ("Direct" if best_acc == avg_dir_acc else "Distributed")
+
+        best_lat = min(avg_cen_lat, avg_dist_lat, avg_dir_lat)
+        lat_winner = "Centralized" if best_lat == avg_cen_lat else ("Direct" if best_lat == avg_dir_lat else "Distributed")
+
+        print(f"\nOVERALL WINNER (averaged over {len(centralized_runs)} runs):")
+        print(f"  Accuracy: {acc_winner} ({avg_cen_acc:.1f}% vs {avg_dist_acc:.1f}% vs {avg_dir_acc:.1f}%)")
+        print(f"  Latency: {lat_winner} ({avg_cen_lat:.2f}s vs {avg_dist_lat:.2f}s vs {avg_dir_lat:.2f}s)")
+        print("=" * 130 + "\n")
+    else:
+        print(f"\n{'STATISTICS':<6} {'Centralized':<42} {'Distributed':<42}")
+        print("-" * 100)
+
+        print(f"{'Accuracy':<6} {format_stats(cen_accs):<42} {format_stats(dist_accs):<42}")
+        print(f"{'Latency':<6} {format_lat_stats(cen_lats):<42} {format_lat_stats(dist_lats):<42}")
+        print(f"{'Hops':<6} {format_stats(cen_hops):<42} {format_stats(dist_hops):<42}")
+
+        # Overall winner
+        print("-" * 100)
+        avg_cen_acc = statistics.mean(cen_accs)
+        avg_dist_acc = statistics.mean(dist_accs)
+        avg_cen_lat = statistics.mean(cen_lats)
+        avg_dist_lat = statistics.mean(dist_lats)
+
+        acc_winner = "Centralized" if avg_cen_acc > avg_dist_acc else ("Distributed" if avg_dist_acc > avg_cen_acc else "Tie")
+        lat_winner = "Centralized" if avg_cen_lat < avg_dist_lat else "Distributed"
+
+        print(f"\nOVERALL WINNER (averaged over {len(centralized_runs)} runs):")
+        print(f"  Accuracy: {acc_winner} ({avg_cen_acc:.1f}% vs {avg_dist_acc:.1f}%)")
+        print(f"  Latency: {lat_winner} ({avg_cen_lat:.2f}s vs {avg_dist_lat:.2f}s)")
+        print("=" * 100 + "\n")
 
 
 def save_results_to_csv(
     centralized_runs: List[Dict],
     distributed_runs: List[Dict],
-    queries: List[tuple],
+    direct_runs: List[Dict] = None,
+    queries: List[tuple] = None,
     output_path: str = None
 ):
     """Save experiment results to a CSV file."""
@@ -484,25 +628,46 @@ def save_results_to_csv(
         # Write header with metadata
         writer.writerow(['Routing Experiment Results'])
         writer.writerow([f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
-        writer.writerow([f'Total Queries: {len(queries)}'])
+        if queries:
+            writer.writerow([f'Total Queries: {len(queries)}'])
         writer.writerow([f'Total Runs: {len(centralized_runs)}'])
         writer.writerow([])
 
+        # Determine if we have direct runs
+        has_direct = direct_runs is not None and len(direct_runs) > 0
+
         # Write per-run summary table
         writer.writerow(['RUN SUMMARY'])
-        writer.writerow(['Run', 'Cent Accuracy', 'Cent Latency (s)', 'Cent Hops',
-                        'Dist Accuracy', 'Dist Latency (s)', 'Dist Hops'])
-
-        for i, (c, d) in enumerate(zip(centralized_runs, distributed_runs), 1):
-            writer.writerow([
-                i,
-                f"{c['accuracy']:.1f}% ({c['correct']}/{c['total']})",
-                f"{c['avg_latency']:.2f}",
-                f"{c['avg_hops']:.1f}",
-                f"{d['accuracy']:.1f}% ({d['correct']}/{d['total']})",
-                f"{d['avg_latency']:.2f}",
-                f"{d['avg_hops']:.1f}"
-            ])
+        if has_direct:
+            writer.writerow(['Run', 'Cent Acc', 'Cent Lat', 'Cent Hop',
+                            'Dist Acc', 'Dist Lat', 'Dist Hop',
+                            'Direct Acc', 'Direct Lat', 'Direct Hop'])
+            for i, ((c, d), dr) in enumerate(zip(zip(centralized_runs, distributed_runs), direct_runs), 1):
+                writer.writerow([
+                    i,
+                    f"{c['accuracy']:.0f}%",
+                    f"{c['avg_latency']:.2f}",
+                    f"{c['avg_hops']:.1f}",
+                    f"{d['accuracy']:.0f}%",
+                    f"{d['avg_latency']:.2f}",
+                    f"{d['avg_hops']:.1f}",
+                    f"{dr['accuracy']:.0f}%",
+                    f"{dr['avg_latency']:.2f}",
+                    f"{dr['avg_hops']:.1f}"
+                ])
+        else:
+            writer.writerow(['Run', 'Cent Accuracy', 'Cent Latency (s)', 'Cent Hops',
+                            'Dist Accuracy', 'Dist Latency (s)', 'Dist Hops'])
+            for i, (c, d) in enumerate(zip(centralized_runs, distributed_runs), 1):
+                writer.writerow([
+                    i,
+                    f"{c['accuracy']:.1f}% ({c['correct']}/{c['total']})",
+                    f"{c['avg_latency']:.2f}",
+                    f"{c['avg_hops']:.1f}",
+                    f"{d['accuracy']:.1f}% ({d['correct']}/{d['total']})",
+                    f"{d['avg_latency']:.2f}",
+                    f"{d['avg_hops']:.1f}"
+                ])
 
         # Write statistics
         writer.writerow([])
@@ -516,46 +681,95 @@ def save_results_to_csv(
         dist_lats = [r['avg_latency'] for r in distributed_runs]
         dist_hops = [r['avg_hops'] for r in distributed_runs]
 
-        writer.writerow(['Metric', 'Centralized Avg', 'Centralized Min', 'Centralized Max',
-                        'Distributed Avg', 'Distributed Min', 'Distributed Max'])
+        if has_direct:
+            dir_accs = [r['accuracy'] for r in direct_runs]
+            dir_lats = [r['avg_latency'] for r in direct_runs]
+            dir_hops = [r['avg_hops'] for r in direct_runs]
 
-        writer.writerow([
-            'Accuracy (%)',
-            f"{statistics.mean(cen_accs):.1f}",
-            f"{min(cen_accs):.1f}",
-            f"{max(cen_accs):.1f}",
-            f"{statistics.mean(dist_accs):.1f}",
-            f"{min(dist_accs):.1f}",
-            f"{max(dist_accs):.1f}"
-        ])
+            writer.writerow(['Metric', 'Cent Avg', 'Cent Min', 'Cent Max',
+                            'Dist Avg', 'Dist Min', 'Dist Max',
+                            'Direct Avg', 'Direct Min', 'Direct Max'])
 
-        writer.writerow([
-            'Latency (s)',
-            f"{statistics.mean(cen_lats):.2f}",
-            f"{min(cen_lats):.2f}",
-            f"{max(cen_lats):.2f}",
-            f"{statistics.mean(dist_lats):.2f}",
-            f"{min(dist_lats):.2f}",
-            f"{max(dist_lats):.2f}"
-        ])
+            writer.writerow([
+                'Accuracy (%)',
+                f"{statistics.mean(cen_accs):.1f}",
+                f"{min(cen_accs):.1f}",
+                f"{max(cen_accs):.1f}",
+                f"{statistics.mean(dist_accs):.1f}",
+                f"{min(dist_accs):.1f}",
+                f"{max(dist_accs):.1f}",
+                f"{statistics.mean(dir_accs):.1f}",
+                f"{min(dir_accs):.1f}",
+                f"{max(dir_accs):.1f}"
+            ])
 
-        writer.writerow([
-            'Hops',
-            f"{statistics.mean(cen_hops):.1f}",
-            f"{min(cen_hops):.1f}",
-            f"{max(cen_hops):.1f}",
-            f"{statistics.mean(dist_hops):.1f}",
-            f"{min(dist_hops):.1f}",
-            f"{max(dist_hops):.1f}"
-        ])
+            writer.writerow([
+                'Latency (s)',
+                f"{statistics.mean(cen_lats):.2f}",
+                f"{min(cen_lats):.2f}",
+                f"{max(cen_lats):.2f}",
+                f"{statistics.mean(dist_lats):.2f}",
+                f"{min(dist_lats):.2f}",
+                f"{max(dist_lats):.2f}",
+                f"{statistics.mean(dir_lats):.2f}",
+                f"{min(dir_lats):.2f}",
+                f"{max(dir_lats):.2f}"
+            ])
+
+            writer.writerow([
+                'Hops',
+                f"{statistics.mean(cen_hops):.1f}",
+                f"{min(cen_hops):.1f}",
+                f"{max(cen_hops):.1f}",
+                f"{statistics.mean(dist_hops):.1f}",
+                f"{min(dist_hops):.1f}",
+                f"{max(dist_hops):.1f}",
+                f"{statistics.mean(dir_hops):.1f}",
+                f"{min(dir_hops):.1f}",
+                f"{max(dir_hops):.1f}"
+            ])
+        else:
+            writer.writerow(['Metric', 'Centralized Avg', 'Centralized Min', 'Centralized Max',
+                            'Distributed Avg', 'Distributed Min', 'Distributed Max'])
+
+            writer.writerow([
+                'Accuracy (%)',
+                f"{statistics.mean(cen_accs):.1f}",
+                f"{min(cen_accs):.1f}",
+                f"{max(cen_accs):.1f}",
+                f"{statistics.mean(dist_accs):.1f}",
+                f"{min(dist_accs):.1f}",
+                f"{max(dist_accs):.1f}"
+            ])
+
+            writer.writerow([
+                'Latency (s)',
+                f"{statistics.mean(cen_lats):.2f}",
+                f"{min(cen_lats):.2f}",
+                f"{max(cen_lats):.2f}",
+                f"{statistics.mean(dist_lats):.2f}",
+                f"{min(dist_lats):.2f}",
+                f"{max(dist_lats):.2f}"
+            ])
+
+            writer.writerow([
+                'Hops',
+                f"{statistics.mean(cen_hops):.1f}",
+                f"{min(cen_hops):.1f}",
+                f"{max(cen_hops):.1f}",
+                f"{statistics.mean(dist_hops):.1f}",
+                f"{min(dist_hops):.1f}",
+                f"{max(dist_hops):.1f}"
+            ])
 
         # Write test queries
-        writer.writerow([])
-        writer.writerow(['TEST QUERIES'])
-        writer.writerow(['Index', 'Query', 'Expected Domain'])
+        if queries:
+            writer.writerow([])
+            writer.writerow(['TEST QUERIES'])
+            writer.writerow(['Index', 'Query', 'Expected Domain'])
 
-        for i, (query, expected) in enumerate(queries, 1):
-            writer.writerow([i, query, expected])
+            for i, (query, expected) in enumerate(queries, 1):
+                writer.writerow([i, query, expected])
 
     logging.info(f"Results saved to {output_path}")
     print(f"\nResults saved to: {output_path}")
@@ -613,6 +827,31 @@ async def run_distributed(queries_to_run, verbose: bool = True, run_num: int = 1
     return distributed_results
 
 
+async def run_direct(queries_to_run, verbose: bool = True, run_num: int = 1):
+    """Run direct routing tests (Idea 3: Root → All sub-agents)."""
+    mode = "direct"
+    logging.info(f"Run {run_num} - {mode.upper()}: Starting with {len(queries_to_run)} queries")
+
+    if verbose:
+        print_header("DIRECT ROUTING (Idea 3 - Root → Sub-Agents)")
+        print(f"Architecture: Root → 148 Sub-Agents (no domain layer)")
+        print(f"Queries: {len(queries_to_run)}")
+
+    coordinator, _ = create_direct_system()
+    direct_results = []
+
+    for i, (query, expected) in enumerate(queries_to_run, 1):
+        result = await run_query_async(coordinator, query, mode, run_num)
+        result['expected'] = expected
+        direct_results.append(result)
+        if verbose:
+            print(f"  [{i}/{len(queries_to_run)}] Tested: {query[:40]}...")
+
+    print_results(direct_results, "Direct", verbose=verbose)
+    logging.info(f"Run {run_num} - {mode.upper()}: Completed")
+    return direct_results
+
+
 async def run_comparison(queries_to_run):
     """Run both and compare."""
     centralized_results = await run_centralized(queries_to_run)
@@ -667,7 +906,7 @@ async def run_comparison(queries_to_run):
 
 async def main_async():
     parser = argparse.ArgumentParser(description="Routing Experiment: Centralized vs Distributed")
-    parser.add_argument("--mode", choices=["centralized", "distributed", "compare", "quick"],
+    parser.add_argument("--mode", choices=["centralized", "distributed", "direct", "compare", "quick"],
                        default="quick", help="Which mode to run")
     parser.add_argument("--queries", type=int, default=10,
                        help="Number of test queries to run")
@@ -689,6 +928,7 @@ async def main_async():
     # Storage for multi-run metrics
     centralized_run_metrics = []
     distributed_run_metrics = []
+    direct_run_metrics = []
 
     for run_num in range(args.runs):
         current_run = run_num + 1
@@ -707,11 +947,15 @@ async def main_async():
             distributed_results = await run_distributed(queries_to_run, verbose=verbose, run_num=current_run)
             distributed_run_metrics.append(calculate_run_metrics(distributed_results, "distributed", current_run))
 
+        if args.mode in ["direct", "compare", "quick"]:
+            direct_results = await run_direct(queries_to_run, verbose=verbose, run_num=current_run)
+            direct_run_metrics.append(calculate_run_metrics(direct_results, "direct", current_run))
+
     # Print multi-run table if multiple runs
     if args.runs > 1 and args.mode in ["compare", "quick"]:
-        print_multi_run_table(centralized_run_metrics, distributed_run_metrics)
+        print_multi_run_table(centralized_run_metrics, distributed_run_metrics, direct_run_metrics)
         # Save to CSV
-        save_results_to_csv(centralized_run_metrics, distributed_run_metrics, queries_to_run, args.output)
+        save_results_to_csv(centralized_run_metrics, distributed_run_metrics, direct_run_metrics, queries_to_run, args.output)
 
     # Print single-run comparison for single run mode
     if args.runs == 1 and args.mode in ["compare", "quick"]:
@@ -719,35 +963,45 @@ async def main_async():
 
         centralized_correct = sum(1 for r in centralized_results if is_correct_routing(r['routed_to'], r['expected']))
         distributed_correct = sum(1 for r in distributed_results if is_correct_routing(r['routed_to'], r['expected']))
+        direct_correct = sum(1 for r in direct_results if is_correct_routing(r['routed_to'], r['expected']))
 
         centralized_avg_lat = sum(r['latency'] for r in centralized_results) / len(centralized_results)
         distributed_avg_lat = sum(r['latency'] for r in distributed_results) / len(distributed_results)
+        direct_avg_lat = sum(r['latency'] for r in direct_results) / len(direct_results)
 
         centralized_avg_hops = sum(r['hop_count'] for r in centralized_results) / len(centralized_results)
         distributed_avg_hops = sum(r['hop_count'] for r in distributed_results) / len(distributed_results)
+        direct_avg_hops = sum(r['hop_count'] for r in direct_results) / len(direct_results)
 
-        print(f"\n{'Metric':<25} {'Centralized':<20} {'Distributed':<20} {'Winner'}")
-        print("-" * 70)
+        print(f"\n{'Metric':<25} {'Centralized':<18} {'Distributed':<18} {'Direct':<18} {'Winner'}")
+        print("-" * 100)
 
         cen_acc = centralized_correct / len(centralized_results) * 100
         dist_acc = distributed_correct / len(distributed_results) * 100
-        acc_diff = abs(cen_acc - dist_acc)
-        acc_winner = "Tie" if acc_diff < 5 else ("Centralized" if cen_acc > dist_acc else "Distributed")
-        print(f"{'Accuracy':<25} {cen_acc:.1f}%{' ':<14} {dist_acc:.1f}%{' ':<14} {acc_winner}")
+        dir_acc = direct_correct / len(direct_results) * 100
+        best_acc = max(cen_acc, dist_acc, dir_acc)
+        acc_winner = "Tie" if (max(cen_acc, dist_acc, dir_acc) - min(cen_acc, dist_acc, dir_acc)) < 5 else (
+            "Centralized" if best_acc == cen_acc else ("Direct" if best_acc == dir_acc else "Distributed"))
+        print(f"{'Accuracy':<25} {cen_acc:.1f}%{' ':<12} {dist_acc:.1f}%{' ':<12} {dir_acc:.1f}%{' ':<12} {acc_winner}")
 
-        lat_winner = "Centralized" if centralized_avg_lat < distributed_avg_lat else "Distributed"
-        print(f"{'Avg Latency':<25} {centralized_avg_lat:.2f}s{' ':<13} {distributed_avg_lat:.2f}s{' ':<13} {lat_winner}")
+        best_lat = min(centralized_avg_lat, distributed_avg_lat, direct_avg_lat)
+        lat_winner = "Centralized" if best_lat == centralized_avg_lat else ("Direct" if best_lat == direct_avg_lat else "Distributed")
+        print(f"{'Avg Latency':<25} {centralized_avg_lat:.2f}s{' ':<11} {distributed_avg_lat:.2f}s{' ':<11} {direct_avg_lat:.2f}s{' ':<11} {lat_winner}")
 
-        hops_winner = "Centralized" if centralized_avg_hops < distributed_avg_hops else "Distributed"
-        print(f"{'Avg Hops':<25} {centralized_avg_hops:.1f}{' ':<14} {distributed_avg_hops:.1f}{' ':<14} {hops_winner}")
+        best_hops = min(centralized_avg_hops, distributed_avg_hops, direct_avg_hops)
+        hops_winner = "Centralized" if best_hops == centralized_avg_hops else ("Direct" if best_hops == direct_avg_hops else "Distributed")
+        print(f"{'Avg Hops':<25} {centralized_avg_hops:.1f}{' ':<12} {distributed_avg_hops:.1f}{' ':<12} {direct_avg_hops:.1f}{' ':<12} {hops_winner}")
 
-        print(f"\n{'Architecture':<25} {'1-2 hops':<20} {'2-3 hops':<20}")
-        print(f"{'Routing Logic':<25} {'Centralized (40 opts)':<20} {'Distributed (5-10 opts)':<20}")
-        print(f"{'Maintenance':<25} {'Single routing file':<20} {'Multiple files':<20}")
+        print(f"\n{'Architecture':<25} {'Root → 40':<18} {'Root → 40 → Sub':<18} {'Root → 148':<18}")
+        print(f"{'Routing Logic':<25} {'Centralized':<18} {'Distributed':<18} {'Direct':<18}")
 
-        print("\n" + "=" * 70)
+        print("\n" + "=" * 100)
         print("RECOMMENDATION:")
-        if dist_acc >= cen_acc:
+        best_acc_val = max(cen_acc, dist_acc, dir_acc)
+        if best_acc_val == dir_acc:
+            winner = "Direct routing (Idea 3)"
+            reason = "Best accuracy with direct sub-agent access"
+        elif best_acc_val == dist_acc:
             winner = "Distributed routing (Idea 2)"
             reason = "Better or equal accuracy with distributed architecture"
         else:
@@ -755,10 +1009,10 @@ async def main_async():
             reason = "Better accuracy despite simpler architecture"
         print(f"  → {winner}")
         print(f"  → {reason}")
-        print("=" * 70 + "\n")
+        print("=" * 100 + "\n")
 
         # Save to CSV for single run too
-        save_results_to_csv(centralized_run_metrics, distributed_run_metrics, queries_to_run, args.output)
+        save_results_to_csv(centralized_run_metrics, distributed_run_metrics, direct_run_metrics, queries_to_run, args.output)
 
     logging.info("Experiment completed successfully")
 
