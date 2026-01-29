@@ -1,6 +1,6 @@
 # Routing Experiment: Centralized vs Distributed
 
-This experiment compares two routing approaches using Google ADK.
+This experiment compares two routing approaches using Google ADK for multi-agent systems with 40 domains.
 
 ## The Two Approaches
 
@@ -21,27 +21,15 @@ Root Coordinator → 40 Domain Agents → Sub-Agents
 - More granular routing (e.g., `it_support_network`, `finance_banking`)
 - Routing logic distributed across domains
 
-**Note**: We initially tested with 5 category agents, but removed them because they created ambiguity and reduced accuracy from 95% → 65%.
-
-## Experiment Results (20 queries)
+## Latest Experiment Results (20 queries, 2 runs)
 
 | Metric | Centralized (Idea 1) | Distributed (Idea 2) | Winner |
 |--------|---------------------|---------------------|--------|
-| **Accuracy** | 100% (20/20) | 95% (19/20) | Centralized |
-| **Avg Latency** | 1.94s | 2.20s | Centralized |
+| **Accuracy** | 97.5% (avg: 95-100%) | 95.0% (consistent) | Centralized |
+| **Avg Latency** | 2.60s | 3.54s | Centralized |
 | **Avg Hops** | 2.0 | 2.9 | Centralized |
 
-### Key Findings
-
-1. **Prompt engineering matters more than architecture**
-   - Adding example queries and routing hints improved centralized from 85% → 100%
-   - Removing categories improved distributed from 65% → 95%
-
-2. **Forced delegation prevents "no route" errors**
-   - "MUST ALWAYS delegate" instruction prevents coordinator from answering directly
-
-3. **Routing hints resolve ambiguous cases**
-   - Explicit rules: "training" → hr, "expense" → finance
+**Centralized wins:** 27% faster latency with better accuracy.
 
 ## Setup
 
@@ -61,32 +49,59 @@ Get your API key from: https://aistudio.google.com/app/apikey
 ## Running the Experiment
 
 ```bash
-# Quick comparison (default 20 queries)
-python3 experiment.py --mode quick
+# Quick comparison (default 10 queries, 1 run)
+python3 experiment.py
 
-# Custom number of queries
-python3 experiment.py --mode compare --queries 30
+# Custom queries and multiple runs for statistics
+python3 experiment.py --queries 20 --runs 3
 
 # Run only centralized
 python3 experiment.py --mode centralized --queries 20
 
 # Run only distributed
 python3 experiment.py --mode distributed --queries 20
+
+# Save results to custom CSV file
+python3 experiment.py --queries 20 --runs 3 --output my_results.csv
 ```
+
+### Command-Line Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--mode` | `quick`, `compare`, `centralized`, `distributed` | `quick` |
+| `--queries` | Number of test queries to run | `10` |
+| `--runs` | Number of times to run (for statistics) | `1` |
+| `--output` | Custom CSV output path | `experiment_results_TIMESTAMP.csv` |
 
 ## Project Structure
 
 ```
 global-routing/
-├── domains.py                # 40 domain configurations with sub-agents
-├── centralized_routing.py    # Idea 1: Centralized routing
-├── distributed_routing.py    # Idea 2: Distributed routing (no categories)
-├── improved_centralized.py  # Enhanced centralized version
-├── experiment.py             # Main comparison script
-├── analyze_errors.py         # Error analysis helper
-├── .env                      # API configuration
-└── README.md                 # This file
+├── domains.py       # 40 domain configurations with keywords, examples, sub-agents
+├── experiment.py     # Main experiment script with both routing implementations
+├── .env              # API configuration (not in git)
+├── .gitignore        # Excludes .env, *.log, *.csv
+└── README.md         # This file
 ```
+
+**Generated files:**
+- `experiment_TIMESTAMP.log` - Timestamped log for each run
+- `experiment_results_TIMESTAMP.csv` - CSV results export
+
+## Output Files
+
+### CSV Results
+Each experiment run generates a CSV file containing:
+- Run summary with accuracy, latency, and hops per run
+- Statistics (avg/min/max) across all runs
+- Complete list of test queries
+
+### Log Files
+Each experiment creates a timestamped log file with:
+- Per-query execution logs
+- Routing results (which agent, hops, latency)
+- Run completion metrics
 
 ## How Correctness is Determined
 
@@ -108,7 +123,8 @@ global-routing/
 
 | Use Case | Recommended |
 |----------|-------------|
-| Most applications | **Centralized** (simple, fast, 100% accurate) |
+| Most applications | **Centralized** (simple, fast, accurate) |
 | Need sub-agent granularity | **Distributed** (`it_support_network` vs `it_support`) |
 | Multiple teams own domains | **Distributed** (each team maintains their routing) |
 | Ambiguous domain boundaries | **Centralized** (routing hints resolve confusion) |
+| Best performance | **Centralized** (fewer hops, lower latency) |
